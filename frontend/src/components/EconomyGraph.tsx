@@ -91,22 +91,34 @@ export default function EconomyGraph({ refreshTrigger = 0 }: { refreshTrigger?: 
         });
         // Build edges from payments
         const payments = paymentsRes.payments || [];
-        const newEdges: PaymentEdge[] = payments.slice(0, 30).map((p: any, i: number) => ({
-          id: p.id || `edge-${i}`,
-          from: p.isA2A ? (p.payer || 'manager') : 'manager',
-          to: p.endpoint ? agentIdFromEndpoint(p.endpoint) : 'unknown',
-          amount: p.amount || '0',
-          token: p.token || 'STT',
-          isA2A: p.isA2A || false,
-          timestamp: p.timestamp || Date.now(),
-          active: Date.now() - (p.timestamp || 0) < 10000,
-        }));
+        const nowMs = Date.now();
+        const newEdges: PaymentEdge[] = payments.slice(0, 30).map((p: any, i: number) => {
+          // timestamp is ISO string from backend — parse it properly
+          const ts = p.timestamp ? (typeof p.timestamp === 'number' ? p.timestamp : Date.parse(p.timestamp)) : nowMs;
+          return {
+            id: p.id || `edge-${i}`,
+            // Use node IDs not display names: A2A = manager→worker, H2A = user→worker
+            from: p.isA2A ? 'manager' : 'user',
+            to: p.endpoint ? agentIdFromEndpoint(p.endpoint) : 'unknown',
+            amount: p.amount || '0',
+            token: p.token || 'STT',
+            isA2A: p.isA2A || false,
+            timestamp: ts,
+            active: nowMs - ts < 15000,  // highlight for 15s after payment
+          };
+        });
         setEdges(newEdges);
       } catch (e) { /* silent */ }
     };
     fetchData();
     const interval = setInterval(fetchData, 4000);
-    return () => clearInterval(interval);
+
+    // Instantly re-fetch on SSE hire/payment events — no waiting for poll
+    const sse = new EventSource(`${API}/api/agent/events`);
+    sse.addEventListener('agent_hired_update', () => fetchData());
+    sse.addEventListener('payment', () => fetchData());
+
+    return () => { clearInterval(interval); sse.close(); };
   }, [refreshTrigger]);
 
   // Canvas rendering

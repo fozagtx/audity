@@ -849,17 +849,25 @@ async function initReactivitySubscription(): Promise<void> {
             // Pull updated reputation from chain — this is the source of truth
             syncReputationFromChain(args.scanner);
           } else if (decoded.eventName === 'AgentHired') {
-            const args = decoded.args as any;
-            console.log(`[REACTIVITY] AgentHired on-chain: ${args.agentId} (total: ${args.totalHires})`);
-            const agent = agentRegistry.find(a => a.id === args.agentId);
-            if (agent) {
-              agent.jobsCompleted = Number(args.totalHires);
+            // NOTE: `agentId` is a `string indexed` in Solidity → stored as keccak256 hash in topics.
+            // The original string is unrecoverable from the event. Re-sync all hire counts from chain.
+            console.log(`[REACTIVITY] AgentHired on-chain — re-syncing all hire counts`);
+            for (const a of agentRegistry) {
+              try {
+                const count = await viemPublicClient.readContract({
+                  address: SECURITY_REGISTRY_ADDRESS,
+                  abi: SECURITY_REGISTRY_ABI,
+                  functionName: 'agentHireCount',
+                  args: [a.id],
+                }) as bigint;
+                a.jobsCompleted = Number(count);
+                broadcastSSE('agent_hired_update', {
+                  agentId:      a.id,
+                  jobsCompleted: Number(count),
+                  source:       'somnia-reactivity',
+                });
+              } catch { /* skip failed agent */ }
             }
-            broadcastSSE('agent_hired_update', {
-              agentId:      args.agentId,
-              jobsCompleted: Number(args.totalHires),
-              source:       'somnia-reactivity',
-            });
           }
         } catch (decodeErr) {
           console.warn('[REACTIVITY] Could not decode event log:', sig);
@@ -2262,14 +2270,98 @@ function fallbackSecurityPlan(query: string): any {
 }
 
 async function runSecurityAgent(toolId: string, params: any, query: string, txHash: string): Promise<any> {
+  // scanContract returns structured JSON so findings can be submitted on-chain
+  if (toolId === 'scanContract') {
+    const contractSource = params.contractSource || params.contractAddress || query;
+    try {
+      const completion = await groq.chat.completions.create({
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert smart contract security auditor with deep knowledge of Solidity vulnerabilities.
+Scan the provided contract for the top-10 Solidity vulnerability classes:
+1. Reentrancy (SWC-107)
+2. Integer Overflow/Underflow (SWC-101)
+3. Access Control flaws (SWC-105, SWC-106)
+4. Logic errors and incorrect state transitions
+5. Flash loan attack surfaces
+6. Uninitialized storage pointers (SWC-109)
+7. Timestamp manipulation (SWC-116)
+8. Front-running / tx.origin misuse (SWC-115)
+9. Unchecked return values (SWC-104)
+10. Denial of service vectors (SWC-113)
+
+Return ONLY valid JSON: { "findings": [ { "vulnType": "reentrancy|overflow|access-control|logic|flash-loan", "severity": "critical|high|medium|low", "line": <number or null>, "description": "<concise description>", "recommendation": "<fix>" } ] }
+If no vulnerabilities found, return { "findings": [] }.`,
+          },
+          { role: 'user', content: `Scan this Solidity contract:\n\n\`\`\`solidity\n${contractSource}\n\`\`\`` },
+        ],
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.2,
+        max_tokens: 1000,
+        response_format: { type: 'json_object' },
+      });
+
+      const raw = completion.choices[0]?.message?.content || '{"findings":[]}';
+      const parsed = JSON.parse(raw);
+      const rawFindings: any[] = Array.isArray(parsed.findings) ? parsed.findings : [];
+
+      // Submit each finding to SecurityRegistry on Somnia → initialises/updates reputation
+      const agent = findBestAgentByCategory('security-scanner');
+      const contractAddress = params.contractAddress || null;
+      const persistedFindings: FindingLog[] = [];
+
+      for (const f of rawFindings) {
+        const vulnType  = (f.vulnType  || 'logic').toLowerCase();
+        const severity  = (f.severity  || 'medium').toLowerCase() as FindingLog['severity'];
+        const rewardSTT = severity === 'critical' ? 0.05 : severity === 'high' ? 0.02 : 0.01;
+
+        const onChainId = await submitFindingOnChain(
+          contractAddress || 'source-provided',
+          vulnType,
+          severity,
+          f.description || '',
+          agent?.id || 'scanner-agent',
+          rewardSTT
+        );
+
+        const entry: FindingLog = {
+          id: onChainId || `finding_${(++findingIdCounter).toString(36)}`,
+          timestamp: Date.now(),
+          contractAddress: contractAddress || 'source-provided',
+          vulnType,
+          severity,
+          description: f.description || '',
+          scannerAgent: agent?.id || 'scanner-agent',
+          confirmed: false,
+          rewardSTT,
+          txHash: onChainId || txHash || undefined,
+        };
+
+        findingLogs.push(entry);
+        broadcastSSE('finding', { ...entry, onChainId, line: f.line, recommendation: f.recommendation });
+        persistedFindings.push(entry);
+      }
+
+      if (agent) {
+        agent.totalEarned += PRICES.scanContract.sttAmount;
+        // Sync reputation from chain now that findings were submitted
+        await syncReputationFromChain(agent.address);
+      }
+
+      return { findings: rawFindings, findingLogs: persistedFindings, summary: `Found ${rawFindings.length} vulnerabilities` };
+    } catch (err: any) {
+      console.error('[runSecurityAgent:scanContract]', err.message);
+      return { findings: [], findingLogs: [], summary: 'Scan failed' };
+    }
+  }
+
   const systemPrompts: Record<string, string> = {
-    scanContract: 'You are an expert smart contract security auditor. Analyze the provided Solidity code for vulnerabilities and return a structured findings list. Focus on reentrancy, overflow, access-control, logic errors, and flash-loan vectors.',
-    validateFinding: 'You are an adversarial smart contract auditor. Independently verify or refute the given vulnerability finding. Be skeptical and evidence-based.',
+    validateFinding: 'You are an adversarial smart contract auditor. Independently verify or refute the given vulnerability finding. Be skeptical and evidence-based. Return JSON: { "confirmed": true|false, "confidence": 0-100, "notes": "..." }',
     simulateExploit: 'You are a smart contract exploit developer. Write a complete Foundry PoC test for the given vulnerability. Include setup, attack, and assertion.',
   };
 
   const userPrompts: Record<string, (p: any, q: string) => string> = {
-    scanContract: (p, q) => `Scan this contract for vulnerabilities:\n${p.contractSource || p.contractAddress || q}`,
     validateFinding: (p, _q) => `Validate this finding:\nType: ${p.finding?.vulnType}\nSeverity: ${p.finding?.severity}\nDescription: ${p.finding?.description}`,
     simulateExploit: (p, _q) => `Generate Foundry exploit PoC for:\nType: ${p.finding?.vulnType}\nSeverity: ${p.finding?.severity}\nDescription: ${p.finding?.description}`,
   };
