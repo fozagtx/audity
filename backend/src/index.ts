@@ -62,10 +62,10 @@ const RPC_HTTP    = SOMNIA.rpcHttp;
 const RPC_WSS     = SOMNIA.rpcWss;
 const RPC_URL     = RPC_HTTP;
 const EXPLORER_BASE = SOMNIA.explorer;
-const SERVER_ADDRESS = process.env.SERVER_ADDRESS || '';
+const SERVER_ADDRESS = '0xDe5df44009FD2E13bBAcfED2b8e3833B5Dc4Bf21';
 const AGENT_PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY || '';
-const SECURITY_REGISTRY_ADDRESS  = (process.env.SECURITY_REGISTRY_ADDRESS  || '') as Hex;
-const WATCHLIST_HANDLER_ADDRESS   = (process.env.WATCHLIST_HANDLER_ADDRESS   || '') as Hex;
+const SECURITY_REGISTRY_ADDRESS  = '0x542A1352b7a62f1D2EF320DC1353f6ECbB1Be4dB' as Hex;
+const WATCHLIST_HANDLER_ADDRESS   = '0x32A69a587488EB9664A7F7E6f6a6a2B33657446A' as Hex;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EVM Wallet — real on-chain STT payments
@@ -152,6 +152,36 @@ const SECURITY_REGISTRY_ABI = [
     stateMutability: 'nonpayable',
     inputs: [{ name: 'findingId', type: 'bytes32' }],
     outputs: [],
+  },
+  {
+    name: 'scannerReputation',
+    type: 'function',
+    stateMutability: 'view',
+    inputs:  [{ name: 'scanner', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'agentHireCount',
+    type: 'function',
+    stateMutability: 'view',
+    inputs:  [{ name: 'agentId', type: 'string' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'recordHire',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs:  [{ name: 'agentId', type: 'string' }],
+    outputs: [],
+  },
+  {
+    name: 'AgentHired',
+    type: 'event',
+    inputs: [
+      { name: 'agentId',    type: 'string',  indexed: true  },
+      { name: 'payer',      type: 'address', indexed: true  },
+      { name: 'totalHires', type: 'uint256', indexed: false },
+    ],
   },
   {
     name: 'FindingSubmitted',
@@ -553,6 +583,90 @@ async function rejectFindingOnChain(onChainId: Hex): Promise<void> {
   }
 }
 
+// ─── On-Chain Reputation Sync ─────────────────────────────────────────────
+
+/**
+ * Read scannerReputation(address) from SecurityRegistry on Somnia and update
+ * all agents that share that address. Broadcasts agent_reputation_update via SSE.
+ */
+async function syncReputationFromChain(scannerAddress: string): Promise<void> {
+  if (!SECURITY_REGISTRY_ADDRESS || !viemPublicClient) return;
+  try {
+    const basisPoints = await viemPublicClient.readContract({
+      address: SECURITY_REGISTRY_ADDRESS,
+      abi: SECURITY_REGISTRY_ABI,
+      functionName: 'scannerReputation',
+      args: [scannerAddress as Hex],
+    }) as bigint;
+
+    const reputationPct = Number(basisPoints) / 100;
+
+    agentRegistry.forEach(a => {
+      if (a.address.toLowerCase() === scannerAddress.toLowerCase()) {
+        a.reputation = reputationPct;
+      }
+    });
+
+    broadcastSSE('agent_reputation_update', {
+      scannerAddress,
+      reputation: reputationPct,
+      basisPoints: Number(basisPoints),
+      source: 'somnia-chain',
+    });
+
+    console.log(`[CHAIN] Reputation for ${scannerAddress}: ${reputationPct}% (${basisPoints} bp)`);
+  } catch (err: any) {
+    console.error('[CHAIN] syncReputationFromChain failed:', err.message);
+  }
+}
+
+/**
+ * Call SecurityRegistry.recordHire(agentId) on Somnia — emits AgentHired.
+ * Reactivity SDK picks it up and broadcasts agent_hired_update via SSE.
+ */
+async function recordHireOnChain(agentId: string): Promise<void> {
+  if (!SECURITY_REGISTRY_ADDRESS || !viemWalletClient) return;
+  try {
+    const hash = await viemWalletClient.writeContract({
+      address: SECURITY_REGISTRY_ADDRESS,
+      abi: SECURITY_REGISTRY_ABI,
+      functionName: 'recordHire',
+      args: [agentId],
+    });
+    console.log(`[CHAIN] recordHire(${agentId}) tx: ${hash}`);
+  } catch (err: any) {
+    console.error('[CHAIN] recordHire failed:', err.message);
+  }
+}
+
+/**
+ * Read agentHireCount(agentId) from SecurityRegistry and update local registry.
+ */
+async function syncHireCountFromChain(agentId: string): Promise<void> {
+  if (!SECURITY_REGISTRY_ADDRESS || !viemPublicClient) return;
+  try {
+    const count = await viemPublicClient.readContract({
+      address: SECURITY_REGISTRY_ADDRESS,
+      abi: SECURITY_REGISTRY_ABI,
+      functionName: 'agentHireCount',
+      args: [agentId],
+    }) as bigint;
+
+    const agent = agentRegistry.find(a => a.id === agentId);
+    if (agent) {
+      agent.jobsCompleted = Number(count);
+      broadcastSSE('agent_hired_update', {
+        agentId,
+        jobsCompleted: Number(count),
+        source: 'somnia-chain',
+      });
+      console.log(`[CHAIN] Hire count for ${agentId}: ${count}`);
+    }
+  } catch (err: any) {
+    console.error('[CHAIN] syncHireCountFromChain failed:', err.message);
+  }
+}
+
 // ─── Somnia Reactivity WebSocket Subscription ─────────────────────────────
 
 /**
@@ -575,12 +689,15 @@ async function initReactivitySubscription(): Promise<void> {
   const FINDING_REJECTED_SIG = keccak256(
     toBytes('FindingRejected(bytes32,address,address)')
   );
+  const AGENT_HIRED_SIG = keccak256(
+    toBytes('AgentHired(string,address,uint256)')
+  );
 
   try {
     await reactivitySDK.subscribe({
       ethCalls: [],
       eventContractSources: [SECURITY_REGISTRY_ADDRESS],
-      topicOverrides: [FINDING_SUBMITTED_SIG, FINDING_CONFIRMED_SIG, FINDING_REJECTED_SIG],
+      topicOverrides: [FINDING_SUBMITTED_SIG, FINDING_CONFIRMED_SIG, FINDING_REJECTED_SIG, AGENT_HIRED_SIG],
       onlyPushChanges: false,
       onData: (data: SubscriptionCallback) => {
         const topics = data.result.topics as Hex[];
@@ -617,6 +734,8 @@ async function initReactivitySubscription(): Promise<void> {
               scanner:    args.scanner,
               source:     'somnia-reactivity',
             });
+            // Pull updated reputation from chain — this is the source of truth
+            syncReputationFromChain(args.scanner);
           } else if (decoded.eventName === 'FindingRejected') {
             const args = decoded.args as any;
             console.log(`[REACTIVITY] FindingRejected on-chain: ${args.findingId}`);
@@ -625,6 +744,20 @@ async function initReactivitySubscription(): Promise<void> {
               validator:  args.validator,
               scanner:    args.scanner,
               source:     'somnia-reactivity',
+            });
+            // Pull updated reputation from chain — this is the source of truth
+            syncReputationFromChain(args.scanner);
+          } else if (decoded.eventName === 'AgentHired') {
+            const args = decoded.args as any;
+            console.log(`[REACTIVITY] AgentHired on-chain: ${args.agentId} (total: ${args.totalHires})`);
+            const agent = agentRegistry.find(a => a.id === args.agentId);
+            if (agent) {
+              agent.jobsCompleted = Number(args.totalHires);
+            }
+            broadcastSSE('agent_hired_update', {
+              agentId:      args.agentId,
+              jobsCompleted: Number(args.totalHires),
+              source:       'somnia-reactivity',
             });
           }
         } catch (decodeErr) {
@@ -713,7 +846,7 @@ interface AgentRegistryEntry {
   address: string;
   endpoint: string;
   category: string;
-  priceCTC: number;
+  priceSTT: number;
   reputation: number;
   jobsCompleted: number;
   jobsFailed: number;
@@ -723,7 +856,7 @@ interface AgentRegistryEntry {
 }
 
 interface PriceConfig {
-  ctcAmount: number;
+  sttAmount: number;
   description: string;
   category: string;
 }
@@ -737,97 +870,52 @@ const findingLogs: FindingLog[] = [];
 let paymentIdCounter = 0;
 let findingIdCounter = 0;
 
+// All agents submit on-chain via the single platform wallet — reputation is live from SecurityRegistry
+const PLATFORM_ADDRESS = '0xDe5df44009FD2E13bBAcfED2b8e3833B5Dc4Bf21';
+
 const agentRegistry: AgentRegistryEntry[] = [
-  // Scanner Agents (3 instances)
   {
-    id: 'scanner-agent-1',
-    name: 'Scanner Agent Alpha',
-    description: 'Primary vulnerability scanner. Detects reentrancy, overflow, access-control, and logic flaws in Solidity contracts.',
-    address: '0x1111111111111111111111111111111111111111',
+    id: 'scanner-agent',
+    name: 'Scanner Agent',
+    description: 'Detects reentrancy, overflow, access-control, flash-loan, and logic vulnerabilities in Solidity contracts.',
+    address: PLATFORM_ADDRESS,
     endpoint: '/api/scan-contract',
     category: 'security-scanner',
-    priceCTC: 0.010,
-    reputation: 92,
-    jobsCompleted: 214,
-    jobsFailed: 8,
-    totalEarned: 2.14,
+    priceSTT: 0.010,
+    reputation: 0,
+    jobsCompleted: 0,
+    jobsFailed: 0,
+    totalEarned: 0,
     isActive: true,
     efficiency: 0,
   },
   {
-    id: 'scanner-agent-2',
-    name: 'Scanner Agent Beta',
-    description: 'Secondary vulnerability scanner. Specializes in flash-loan attack surfaces and DeFi-specific vulnerabilities.',
-    address: '0x2222222222222222222222222222222222222222',
-    endpoint: '/api/scan-contract',
-    category: 'security-scanner',
-    priceCTC: 0.010,
-    reputation: 89,
-    jobsCompleted: 187,
-    jobsFailed: 11,
-    totalEarned: 1.87,
-    isActive: true,
-    efficiency: 0,
-  },
-  {
-    id: 'scanner-agent-3',
-    name: 'Scanner Agent Gamma',
-    description: 'Tertiary vulnerability scanner. Focuses on access-control issues and privilege escalation in upgradeable contracts.',
-    address: '0x3333333333333333333333333333333333333333',
-    endpoint: '/api/scan-contract',
-    category: 'security-scanner',
-    priceCTC: 0.010,
-    reputation: 87,
-    jobsCompleted: 163,
-    jobsFailed: 9,
-    totalEarned: 1.63,
-    isActive: true,
-    efficiency: 0,
-  },
-  // Validator Agents (2 instances)
-  {
-    id: 'validator-agent-1',
-    name: 'Validator Agent Prime',
-    description: 'Adversarial auditor. Confirms or denies scanner findings with independent reasoning and confidence scoring.',
-    address: '0x4444444444444444444444444444444444444444',
+    id: 'validator-agent',
+    name: 'Validator Agent',
+    description: 'Adversarially confirms or rejects scanner findings with independent reasoning and confidence scoring.',
+    address: PLATFORM_ADDRESS,
     endpoint: '/api/validate-finding',
     category: 'security-validator',
-    priceCTC: 0.005,
-    reputation: 94,
-    jobsCompleted: 312,
-    jobsFailed: 6,
-    totalEarned: 1.56,
+    priceSTT: 0.005,
+    reputation: 0,
+    jobsCompleted: 0,
+    jobsFailed: 0,
+    totalEarned: 0,
     isActive: true,
     efficiency: 0,
   },
   {
-    id: 'validator-agent-2',
-    name: 'Validator Agent Secondary',
-    description: 'Cross-validation specialist. Provides second-opinion auditing with alternative attack path analysis.',
-    address: '0x5555555555555555555555555555555555555555',
-    endpoint: '/api/validate-finding',
-    category: 'security-validator',
-    priceCTC: 0.005,
-    reputation: 91,
-    jobsCompleted: 278,
-    jobsFailed: 9,
-    totalEarned: 1.39,
-    isActive: true,
-    efficiency: 0,
-  },
-  // Exploit Sim Agent (1 instance)
-  {
-    id: 'exploit-sim-agent-1',
+    id: 'exploit-sim-agent',
     name: 'Exploit Sim Agent',
     description: 'Generates Foundry/Hardhat PoC exploit test code for confirmed vulnerabilities. Estimates potential loss.',
-    address: '0x6666666666666666666666666666666666666666',
+    address: PLATFORM_ADDRESS,
     endpoint: '/api/simulate-exploit',
     category: 'security-exploit',
-    priceCTC: 0.020,
-    reputation: 96,
-    jobsCompleted: 89,
-    jobsFailed: 2,
-    totalEarned: 1.78,
+    priceSTT: 0.020,
+    reputation: 0,
+    jobsCompleted: 0,
+    jobsFailed: 0,
+    totalEarned: 0,
     isActive: true,
     efficiency: 0,
   },
@@ -835,8 +923,8 @@ const agentRegistry: AgentRegistryEntry[] = [
 
 // Calculate efficiency scores
 agentRegistry.forEach(a => {
-  a.efficiency = a.priceCTC > 0
-    ? Math.round((a.reputation / 100) * (1 / (a.priceCTC + 0.001)) * 100) / 100
+  a.efficiency = a.priceSTT > 0
+    ? Math.round((a.reputation / 100) * (1 / (a.priceSTT + 0.001)) * 100) / 100
     : 0;
 });
 
@@ -872,7 +960,7 @@ function createSTTPaymentChallenge(config: PriceConfig): object {
     network: NETWORK,
     chainId: parseInt(CHAIN_ID),
     payTo: SERVER_ADDRESS,
-    amount: config.ctcAmount.toString(),
+    amount: config.sttAmount.toString(),
     token: 'STT',
     description: config.description,
     rpcUrl: RPC_URL,
@@ -888,7 +976,7 @@ function createPaidRoute(config: PriceConfig) {
       res.status(402).json({
         error: 'Payment Required',
         x402: createSTTPaymentChallenge(config),
-        message: `This endpoint requires ${config.ctcAmount} STT on Somnia Testnet (chain ${CHAIN_ID}).`,
+        message: `This endpoint requires ${config.sttAmount} STT on Somnia Testnet (chain ${CHAIN_ID}).`,
       });
       return;
     }
@@ -925,7 +1013,7 @@ function logPayment(
     worker: opts.workerName || endpoint.split('/').pop() || 'unknown',
     transaction: txId,
     token: 'STT',
-    amount: `${priceConfig.ctcAmount} STT`,
+    amount: `${priceConfig.sttAmount} STT`,
     explorerUrl: getExplorerURL(txId),
     isA2A: opts.isA2A || false,
     parentJobId: opts.parentJobId,
@@ -947,17 +1035,17 @@ function logPayment(
 
 const PRICES: Record<string, PriceConfig> = {
   scanContract: {
-    ctcAmount: 0.010,
+    sttAmount: 0.010,
     description: 'Scanner Agent — detect top-10 Solidity vulnerabilities',
     category: 'security-scanner',
   },
   validateFinding: {
-    ctcAmount: 0.005,
+    sttAmount: 0.005,
     description: 'Validator Agent — confirm or deny scanner findings with reasoning',
     category: 'security-validator',
   },
   simulateExploit: {
-    ctcAmount: 0.020,
+    sttAmount: 0.020,
     description: 'Exploit Sim Agent — generate Foundry/Hardhat PoC exploit test code',
     category: 'security-exploit',
   },
@@ -1036,7 +1124,7 @@ app.get('/api/tools', (_req: Request, res: Response) => {
       name: 'Scanner Agent',
       endpoint: '/api/scan-contract',
       method: 'POST',
-      price: { STT: PRICES.scanContract.ctcAmount },
+      price: { STT: PRICES.scanContract.sttAmount },
       category: 'security-scanner',
       description: PRICES.scanContract.description,
       reputation: findBestAgentByCategory('security-scanner')?.reputation || 0,
@@ -1054,7 +1142,7 @@ app.get('/api/tools', (_req: Request, res: Response) => {
       name: 'Validator Agent',
       endpoint: '/api/validate-finding',
       method: 'POST',
-      price: { STT: PRICES.validateFinding.ctcAmount },
+      price: { STT: PRICES.validateFinding.sttAmount },
       category: 'security-validator',
       description: PRICES.validateFinding.description,
       reputation: findBestAgentByCategory('security-validator')?.reputation || 0,
@@ -1071,7 +1159,7 @@ app.get('/api/tools', (_req: Request, res: Response) => {
       name: 'Exploit Sim Agent',
       endpoint: '/api/simulate-exploit',
       method: 'POST',
-      price: { STT: PRICES.simulateExploit.ctcAmount },
+      price: { STT: PRICES.simulateExploit.sttAmount },
       category: 'security-exploit',
       description: PRICES.simulateExploit.description,
       reputation: findBestAgentByCategory('security-exploit')?.reputation || 0,
@@ -1105,7 +1193,7 @@ app.get('/api/registry', (req: Request, res: Response) => {
       agents.sort((a, b) => b.reputation - a.reputation);
       break;
     case 'price':
-      agents.sort((a, b) => a.priceCTC - b.priceCTC);
+      agents.sort((a, b) => a.priceSTT - b.priceSTT);
       break;
     case 'jobs':
       agents.sort((a, b) => b.jobsCompleted - a.jobsCompleted);
@@ -1421,7 +1509,7 @@ If no vulnerabilities found, return { "findings": [] }.`;
     persistedFindings.push(entry);
   }
 
-  if (agent) { agent.jobsCompleted++; agent.totalEarned += PRICES.scanContract.ctcAmount; }
+  if (agent) { agent.totalEarned += PRICES.scanContract.sttAmount; recordHireOnChain(agent.id); }
 
   res.json({
     findings: rawFindings,
@@ -1486,16 +1574,6 @@ Is this finding valid and exploitable? Return your verdict.`;
     logEntry.validatorAgent = agent?.id;
   }
 
-  // Reputation adjustment on scanner (off-chain registry)
-  const scannerAgent = agentRegistry.find(a => a.id === (logEntry?.scannerAgent || finding.scannerAgent));
-  if (scannerAgent) {
-    if (validationResult.confirmed) {
-      scannerAgent.reputation = Math.min(100, scannerAgent.reputation + 0.5);
-    } else {
-      scannerAgent.reputation = Math.max(0, scannerAgent.reputation - 1);
-    }
-  }
-
   // Push verdict to SecurityRegistry on Somnia — fires FindingConfirmed or FindingRejected
   // Somnia Reactivity propagates to all on-chain and WebSocket subscribers
   const onChainId = (finding.txHash?.startsWith('0x') ? finding.txHash : null) as Hex | null;
@@ -1507,7 +1585,7 @@ Is this finding valid and exploitable? Return your verdict.`;
     }
   }
 
-  if (agent) { agent.jobsCompleted++; agent.totalEarned += PRICES.validateFinding.ctcAmount; }
+  if (agent) { agent.totalEarned += PRICES.validateFinding.sttAmount; recordHireOnChain(agent.id); }
 
   broadcastSSE('finding_validated', { findingId: finding.id, ...validationResult });
 
@@ -1569,7 +1647,7 @@ Generate a complete Foundry test demonstrating the exploit.`;
     };
   }
 
-  if (agent) { agent.jobsCompleted++; agent.totalEarned += PRICES.simulateExploit.ctcAmount; }
+  if (agent) { agent.totalEarned += PRICES.simulateExploit.sttAmount; recordHireOnChain(agent.id); }
 
   res.json({
     exploitCode: exploitResult.exploitCode,
@@ -1630,9 +1708,9 @@ function autonomousHiringDecision(
   const chosen = scored[0].agent;
   const alternatives = scored.slice(1).map(s => s.agent);
 
-  const reason = `Selected ${chosen.name} (Rep: ${chosen.reputation}/100, Cost: ${chosen.priceCTC} STT, Efficiency: ${scored[0].score.toFixed(1)}). ` +
+  const reason = `Selected ${chosen.name} (Rep: ${chosen.reputation}/100, Cost: ${chosen.priceSTT} STT, Efficiency: ${scored[0].score.toFixed(1)}). ` +
     (alternatives.length > 0
-      ? `Rejected ${alternatives[0].name} (Rep: ${alternatives[0].reputation}, Cost: ${alternatives[0].priceCTC} STT) — lower efficiency.`
+      ? `Rejected ${alternatives[0].name} (Rep: ${alternatives[0].reputation}, Cost: ${alternatives[0].priceSTT} STT) — lower efficiency.`
       : 'No alternatives available.');
 
   return { chosen, reason, alternatives };
@@ -1668,7 +1746,7 @@ async function runManagerAgent(
 
   const toolsList = Object.entries(PRICES).map(([id, config]) => {
     const agent = findBestAgentByCategory(config.category);
-    return `- "${id}": ${agent?.name || id} | ${config.description} | Cost: ${config.ctcAmount} STT | Rep: ${agent?.reputation || 80}/100`;
+    return `- "${id}": ${agent?.name || id} | ${config.description} | Cost: ${config.sttAmount} STT | Rep: ${agent?.reputation ?? 0}/100`;
   }).join('\n');
 
   const plannerPrompt = `You are the AUDITY MANAGER — an AI security orchestrator for smart contract audits.
@@ -1746,7 +1824,7 @@ Return ONLY valid JSON:
       continue;
     }
 
-    if (totalCost.STT + price.ctcAmount > budgetLimit) {
+    if (totalCost.STT + price.sttAmount > budgetLimit) {
       results.push({ tool: toolId, result: null, error: `Budget limit reached (${budgetLimit} STT).` });
       continue;
     }
@@ -1757,11 +1835,11 @@ Return ONLY valid JSON:
     hiringDecisions.push({
       agent: agentName,
       reason: hiring.reason,
-      cost: price.ctcAmount,
+      cost: price.sttAmount,
       reputation: hiring.chosen?.reputation || 0,
       alternative: hiring.alternatives[0]?.name,
       alternativeReason: hiring.alternatives[0]
-        ? `${hiring.alternatives[0].reputation}/100 rep, ${hiring.alternatives[0].priceCTC} STT`
+        ? `${hiring.alternatives[0].reputation}/100 rep, ${hiring.alternatives[0].priceSTT} STT`
         : undefined,
     });
 
@@ -1776,17 +1854,17 @@ Return ONLY valid JSON:
       });
       sendSSETo(clientId, 'step', {
         label: `Hiring ${agentName}`,
-        detail: `${price.ctcAmount} STT | Rep: ${hiring.chosen?.reputation || 'N/A'}/100`,
+        detail: `${price.sttAmount} STT | Rep: ${hiring.chosen?.reputation || 'N/A'}/100`,
         status: 'active',
       });
     }
 
-    totalCost.STT += price.ctcAmount;
+    totalCost.STT += price.sttAmount;
 
     const challengeTrace = {
       step: `HTTP 402 Payment Required → ${agentName}`,
       httpStatus: 402,
-      headers: { 'x-402-version': '1.0', 'x-pay-to': SERVER_ADDRESS, 'x-amount': `${price.ctcAmount} STT`, 'x-chain': CHAIN_ID },
+      headers: { 'x-402-version': '1.0', 'x-pay-to': SERVER_ADDRESS, 'x-amount': `${price.sttAmount} STT`, 'x-chain': CHAIN_ID },
       timestamp: new Date().toISOString(),
     };
     protocolTrace.push(challengeTrace);
@@ -1795,7 +1873,7 @@ Return ONLY valid JSON:
     // Send real STT payment on-chain
     let txHash: string;
     try {
-      txHash = await sendSTTPayment(SERVER_ADDRESS, price.ctcAmount);
+      txHash = await sendSTTPayment(SERVER_ADDRESS, price.sttAmount);
     } catch (payErr: any) {
       console.error(`[PAYMENT] STT transfer failed: ${payErr.message}`);
       throw new Error(`STT payment failed for ${agentName}: ${payErr.message}`);
@@ -1807,7 +1885,7 @@ Return ONLY valid JSON:
     const payment = {
       transaction: txHash,
       token: 'STT',
-      amount: `${price.ctcAmount} STT`,
+      amount: `${price.sttAmount} STT`,
       explorerUrl: getExplorerURL(txHash),
     };
 
@@ -1847,30 +1925,30 @@ Return ONLY valid JSON:
       });
       sendSSETo(clientId, 'step', {
         label: `Hiring ${agentName}`,
-        detail: `Paid ${price.ctcAmount} STT ✓`,
+        detail: `Paid ${price.sttAmount} STT ✓`,
         status: 'complete',
       });
     }
 
     const registryAgent = agentRegistry.find(a => a.name === agentName);
     if (registryAgent) {
-      registryAgent.jobsCompleted++;
-      registryAgent.totalEarned += price.ctcAmount;
+      registryAgent.totalEarned += price.sttAmount;
+      recordHireOnChain(registryAgent.id);
     }
   }
 
   // audit-full: validate each finding then simulate criticals
   if (llmPlan.intent === 'audit-full' && scannedFindings.length > 0) {
     for (const finding of scannedFindings.slice(0, 5)) {
-      if (totalCost.STT + PRICES.validateFinding.ctcAmount > budgetLimit) break;
+      if (totalCost.STT + PRICES.validateFinding.sttAmount > budgetLimit) break;
 
-      totalCost.STT += PRICES.validateFinding.ctcAmount;
+      totalCost.STT += PRICES.validateFinding.sttAmount;
       const validationResult = await runSecurityAgent('validateFinding', { finding, contractSource: toolCalls[0]?.params?.contractSource }, query, '');
       results.push({ tool: 'Validator Agent', result: validationResult });
 
       if (validationResult?.confirmed && finding.severity === 'critical') {
-        if (totalCost.STT + PRICES.simulateExploit.ctcAmount <= budgetLimit) {
-          totalCost.STT += PRICES.simulateExploit.ctcAmount;
+        if (totalCost.STT + PRICES.simulateExploit.sttAmount <= budgetLimit) {
+          totalCost.STT += PRICES.simulateExploit.sttAmount;
           const exploitResult = await runSecurityAgent('simulateExploit', { finding, contractSource: toolCalls[0]?.params?.contractSource }, query, '');
           results.push({ tool: 'Exploit Sim Agent', result: exploitResult });
         }
@@ -2053,4 +2131,8 @@ app.listen(PORT, HOST, async () => {
   // Start Somnia Reactivity WebSocket subscriptions
   await initReactivitySubscription();   // SecurityRegistry events
   await initWatchlistSubscription();    // WatchlistHandler RescanRequested events
+
+  // Seed reputation and hire counts from chain
+  await syncReputationFromChain(PLATFORM_ADDRESS);
+  await Promise.all(agentRegistry.map(a => syncHireCountFromChain(a.id)));
 });

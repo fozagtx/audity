@@ -30,7 +30,7 @@ export default function ToolCatalog() {
           name: t.name,
           category: t.category,
           description: t.description,
-          price: t.price?.STT ?? t.price?.CTC ?? 0,
+          price: t.price?.STT ?? 0,
           token: 'STT',
           canHireSubAgents: t.canHireSubAgents,
           reputation: t.reputation || 95,

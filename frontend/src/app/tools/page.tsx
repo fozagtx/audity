@@ -10,7 +10,7 @@ interface Tool {
   name: string;
   category: string;
   description: string;
-  price: { STT?: number; CTC?: number };
+  price: { STT?: number };
   endpoint: string;
   jobsCompleted: number;
   reputation: number;
@@ -166,7 +166,7 @@ export default function ToolsPage() {
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: 4 }}>Price per scan</div>
                 <div className="mono" style={{ fontSize: '1.3rem', fontWeight: 800, color: '#6EE7B7' }}>
-                  {tool.price?.STT ?? tool.price?.CTC} STT
+                  {tool.price?.STT} STT
                 </div>
               </div>
               <button className="btn btn-primary" style={{ minWidth: 140 }}>

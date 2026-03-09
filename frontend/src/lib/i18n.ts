@@ -8,7 +8,7 @@ export const translations = {
     tools: 'Tools',
     // AgentChat
     managerAgent: 'Security Agent',
-    placeholder: 'Paste contract source or enter 0x address...',
+    placeholder: 'Paste Solidity source code here (// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\ncontract MyContract { ... })',
     thinking: 'Scanning...',
     // TransactionLog
     transactions: 'Payments',

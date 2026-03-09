@@ -52,10 +52,33 @@ export default function AgentsPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Live updates via SSE — patch jobsCompleted and reputation as chain events arrive
+  useEffect(() => {
+    const sse = new EventSource(`${API}/api/agent/events`);
+
+    sse.addEventListener('agent_hired_update', (e) => {
+      try {
+        const { agentId, jobsCompleted } = JSON.parse(e.data);
+        setAgents(prev => prev.map(a => a.id === agentId ? { ...a, jobsCompleted } : a));
+      } catch {}
+    });
+
+    sse.addEventListener('agent_reputation_update', (e) => {
+      try {
+        const { scannerAddress, reputation } = JSON.parse(e.data);
+        setAgents(prev => prev.map(a =>
+          a.address?.toLowerCase() === scannerAddress?.toLowerCase() ? { ...a, reputation } : a
+        ));
+      } catch {}
+    });
+
+    return () => sse.close();
+  }, []);
+
   const sortedAgents = [...agents].sort((a, b) => {
     if (sortBy === 'reputation') return b.reputation - a.reputation;
     if (sortBy === 'efficiency') return b.efficiency - a.efficiency;
-    if (sortBy === 'price') return (a.priceSTT || a.priceCTC) - (b.priceSTT || b.priceCTC);
+    if (sortBy === 'price') return a.priceSTT - b.priceSTT;
     return 0;
   });
 
@@ -241,7 +264,7 @@ export default function AgentsPage() {
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '0.7rem', color: '#71717a', marginBottom: 4 }}>{t.price.toUpperCase()}</div>
                 <div className="mono" style={{ fontSize: '1.1rem', fontWeight: 800, color: '#ffffff' }}>
-                  {agent.priceSTT || agent.priceCTC} STT
+                  {agent.priceSTT} STT
                 </div>
               </div>
             </div>

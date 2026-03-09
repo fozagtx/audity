@@ -39,12 +39,9 @@ const NODE_COLORS: Record<string, { bg: string; border: string; glow: string }> 
 };
 
 const WORKER_AGENTS = [
-  { id: 'scanner-agent-1',   label: 'Scanner 1',   slot: 0 },
-  { id: 'scanner-agent-2',   label: 'Scanner 2',   slot: 1 },
-  { id: 'scanner-agent-3',   label: 'Scanner 3',   slot: 2 },
-  { id: 'validator-agent-1', label: 'Validator 1', slot: 3 },
-  { id: 'validator-agent-2', label: 'Validator 2', slot: 4 },
-  { id: 'exploit-sim-agent', label: 'Exploit Sim', slot: 5 },
+  { id: 'scanner-agent',     label: 'Scanner',     slot: 0 },
+  { id: 'validator-agent',   label: 'Validator',   slot: 1 },
+  { id: 'exploit-sim-agent', label: 'Exploit Sim', slot: 2 },
 ];
 
 export default function EconomyGraph({ refreshTrigger = 0 }: { refreshTrigger?: number }) {
@@ -70,7 +67,7 @@ export default function EconomyGraph({ refreshTrigger = 0 }: { refreshTrigger?: 
       nodes.push({
         id: w.id, label: w.label, type: 'worker',
         x: startX + i * spacing, y: workerY,
-        reputation: agent?.reputation ?? 80,
+        reputation: agent?.reputation ?? 0,
         earnings: agent?.earnings ?? 0,
       });
     });

@@ -188,6 +188,22 @@ export default function AgentChat({ onNewPayments, onProtocolTrace }: Params) {
         } catch (e) { console.error('SSE FindingOnchain Error:', e); }
       });
 
+      sse.addEventListener('agent_reputation_update', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          onNewPayments(0);
+          onProtocolTrace({ type: 'agent_reputation_update', ...data });
+        } catch (e) { console.error('SSE ReputationUpdate Error:', e); }
+      });
+
+      sse.addEventListener('agent_hired_update', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          onNewPayments(0);
+          onProtocolTrace({ type: 'agent_hired_update', ...data });
+        } catch (e) { console.error('SSE AgentHiredUpdate Error:', e); }
+      });
+
       sse.addEventListener('hiring_decision', (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -447,13 +463,21 @@ export default function AgentChat({ onNewPayments, onProtocolTrace }: Params) {
 
       {/* ── Input Area ── */}
       <form onSubmit={handleSubmit} style={{ position: 'relative' }}>
-        <input
-          type="text"
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <span className="mono" style={{ fontSize: '0.7rem', color: '#6EE7B7', textTransform: 'uppercase', letterSpacing: 2 }}>
+            Solidity Source Only
+          </span>
+          <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.35)' }}>
+            — paste .sol code, not a contract address
+          </span>
+        </div>
+        <textarea
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t.placeholder}
           disabled={isProcessing}
           className="mono"
+          rows={5}
           style={{
             width: '100%',
             background: '#111111',
@@ -461,12 +485,21 @@ export default function AgentChat({ onNewPayments, onProtocolTrace }: Params) {
             color: '#FFFFFF',
             padding: '16px 20px',
             paddingRight: 60,
-            fontSize: '1rem',
+            fontSize: '0.85rem',
             borderRadius: 0,
             outline: 'none',
+            resize: 'vertical',
+            lineHeight: 1.6,
+            fontFamily: 'monospace',
           }}
           onFocus={(e) => e.target.style.borderColor = '#6EE7B7'}
           onBlur={(e) => e.target.style.borderColor = 'rgba(110, 231, 183, 0.2)'}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              handleSubmit(e as any);
+            }
+          }}
         />
         <button
           type="submit"
@@ -474,8 +507,7 @@ export default function AgentChat({ onNewPayments, onProtocolTrace }: Params) {
           style={{
             position: 'absolute',
             right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
+            bottom: 12,
             background: query.trim() && !isProcessing ? '#6EE7B7' : 'rgba(110, 231, 183, 0.15)',
             border: '1px solid rgba(110, 231, 183, 0.3)',
             color: query.trim() && !isProcessing ? '#0A0A0A' : '#6EE7B7',
@@ -492,6 +524,9 @@ export default function AgentChat({ onNewPayments, onProtocolTrace }: Params) {
         >
           {isProcessing ? <Loader2 size={20} className="spin" /> : <Send size={20} strokeWidth={3} />}
         </button>
+        <div style={{ marginTop: 6, fontSize: '0.68rem', color: 'rgba(255,255,255,0.3)', textAlign: 'right' }}>
+          Ctrl+Enter to submit
+        </div>
       </form>
 
       {/* ── Status Bar ── */}

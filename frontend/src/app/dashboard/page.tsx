@@ -31,7 +31,7 @@ export default function Home() {
       } : log;
       setHiringDecisions(prev => [...prev, decisionLog]);
       setRefreshTrigger(prev => prev + 1);
-    } else if (log.type === 'finding' || log.type === 'finding_onchain') {
+    } else if (log.type === 'finding' || log.type === 'finding_onchain' || log.type === 'agent_reputation_update' || log.type === 'agent_hired_update') {
       setRefreshTrigger(prev => prev + 1);
     } else {
       setProtocolData(prev => [...prev, log]);

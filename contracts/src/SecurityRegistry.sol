@@ -85,6 +85,9 @@ contract SecurityRegistry {
     /// @notice Scanner reputation scores in basis points (0–10000) per address.
     mapping(address => uint256) public scannerReputation;
 
+    /// @notice Total hire count per agent ID string.
+    mapping(string => uint256) public agentHireCount;
+
     // ─── Events ──────────────────────────────────────────────────────────────
 
     /**
@@ -127,6 +130,18 @@ contract SecurityRegistry {
         bytes32 indexed findingId,
         address indexed validator,
         address indexed scanner
+    );
+
+    /**
+     * @notice Emitted when an agent is hired to perform a job.
+     * @param agentId The string identifier of the hired agent.
+     * @param payer Address that triggered the hire.
+     * @param totalHires Running total of hires for this agent.
+     */
+    event AgentHired(
+        string indexed agentId,
+        address indexed payer,
+        uint256 totalHires
     );
 
     // ─── Custom Errors ───────────────────────────────────────────────────────
@@ -264,6 +279,16 @@ contract SecurityRegistry {
             : 0;
 
         emit FindingRejected(findingId, msg.sender, scanner);
+    }
+
+    /**
+     * @notice Record a hire for an agent. Increments the agent's hire counter and emits AgentHired.
+     * @dev Called by the backend after a successful x402 payment to an agent.
+     * @param agentId The string identifier of the hired agent (e.g. "scanner-agent").
+     */
+    function recordHire(string calldata agentId) external {
+        agentHireCount[agentId]++;
+        emit AgentHired(agentId, msg.sender, agentHireCount[agentId]);
     }
 
     // ─── Views ───────────────────────────────────────────────────────────────

@@ -40,7 +40,7 @@ bun run lint    # ESLint
 ### Request Flow
 1. User pastes contract source or address via `AgentChat.tsx` (frontend)
 2. `POST /api/agent/query` → Backend Manager Agent
-3. Manager LLM (Groq primary, Gemini fallback) routes to the best security agent
+3. Manager LLM (Groq) routes to the best security agent
 4. Backend wraps worker calls with x402 payment middleware (HTTP 402 → STT payment → 200)
 5. Results stream back to frontend via SSE (`GET /api/agent/events`)
 6. `EconomyGraph.tsx` visualizes payment topology via Canvas API in real-time
@@ -50,7 +50,7 @@ bun run lint    # ESLint
 Single file containing:
 - Express app + middleware setup
 - Custom STT x402 payment middleware (HTTP 402 challenge, STT verification)
-- Manager Agent orchestration logic with Groq/Gemini LLM integration
+- Manager Agent orchestration logic with Groq LLM integration
 - 3 paid security agent endpoints (see table below)
 - FindingLog in-memory store (mirrors paymentLogs pattern)
 - Free endpoints: `/api/tools`, `/api/registry`, `/api/payments`, `/api/findings`, `/api/stats`, `/api/agent/events` (SSE)
@@ -60,9 +60,9 @@ Single file containing:
 
 | Agent | Endpoint | Price (STT) | Description |
 |-------|----------|-------------|-------------|
-| Scanner Agent (×3) | POST /api/scan-contract | 0.010 STT | Detect top-10 Solidity vulnerabilities |
-| Validator Agent (×2) | POST /api/validate-finding | 0.005 STT | Adversarial finding confirmation |
-| Exploit Sim Agent (×1) | POST /api/simulate-exploit | 0.020 STT | Foundry/Hardhat PoC exploit generation |
+| Scanner Agent | POST /api/scan-contract | 0.010 STT | Detect top-10 Solidity vulnerabilities |
+| Validator Agent | POST /api/validate-finding | 0.005 STT | Adversarial finding confirmation |
+| Exploit Sim Agent | POST /api/simulate-exploit | 0.020 STT | Foundry/Hardhat PoC exploit generation |
 
 ### Manager Intent Routing
 - `scan` / `audit` / `check contract` → `scanContract`
@@ -71,7 +71,7 @@ Single file containing:
 - `audit-full` / `full audit` → chains scan → validate each finding → simulate criticals
 
 ### Smart Contracts (`contracts/`)
-- `AgentRegistry.sol` — Agent registration, job lifecycle, reputation scoring, CTC/STT escrow
+- `AgentRegistry.sol` — Agent registration, job lifecycle, reputation scoring, STT escrow
 - `SecurityRegistry.sol` (Phase 2) — Finding submission, on-chain confirmation, $BUG reward
 
 ### Frontend (`frontend/src/`)
@@ -86,7 +86,7 @@ Single file containing:
 - `NETWORK=somnia-testnet`, `CHAIN_ID=50312`
 - `RPC_URL=https://dream-rpc.somnia.network`
 - `SERVER_ADDRESS` — EVM address receiving payments (0x... format)
-- `GROQ_API_KEY`, `GEMINI_API_KEY` (fallback)
+- `GROQ_API_KEY`
 
 **Frontend**:
 - `NEXT_PUBLIC_API_URL` — Backend URL
@@ -102,7 +102,7 @@ Single file containing:
 ## Key Patterns
 
 - **x402 Protocol**: HTTP 402 payment-required gates all paid endpoints; middleware returns STT payment challenge, then forwards to handler
-- **LLM Fallback**: Groq (`llama-3.3-70b`) is primary; Gemini 2.0 Flash is fallback for all planning calls
+- **LLM**: Groq (`llama-3.3-70b`) for all planning and agent calls
 - **Security Focus**: All agents are specialized for Solidity vulnerability detection — scanner → validator → exploit sim pipeline
 - **FindingLog**: In-memory store of all discovered vulnerabilities, broadcast via SSE `finding` event
 - **localStorage key**: `audity_client_id`
