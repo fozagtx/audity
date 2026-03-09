@@ -165,7 +165,7 @@ export default function ToolsPage() {
                 </div>
                 <div>
                   <span style={{ fontSize: '0.75rem', color: '#71717a' }}>Jobs completed: </span>
-                  <span className="mono" style={{ fontSize: '0.85rem', color: '#FFFFFF', fontWeight: 600 }}>
+                  <span className="mono" style={{ fontSize: '1.1rem', color: '#34D399', fontWeight: 800 }}>
                     {tool.jobsCompleted.toLocaleString()}
                   </span>
                 </div>

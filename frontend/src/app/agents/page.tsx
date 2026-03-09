@@ -280,7 +280,9 @@ export default function AgentsPage() {
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                 <span>{t.jobsCompleted}</span>
-                <span className="mono" style={{ color: 'white' }}>{agent.jobsCompleted}</span>
+                <span className="mono" style={{ color: '#34d399', fontWeight: 800, fontSize: '1rem' }}>
+                  {agent.jobsCompleted.toLocaleString()}
+                </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span>{t.reliability}</span>

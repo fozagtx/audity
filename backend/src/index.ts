@@ -213,6 +213,43 @@ const SECURITY_REGISTRY_ABI = [
       { name: 'scanner',    type: 'address', indexed: true },
     ],
   },
+  {
+    name: 'totalFindings',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'getFindingIds',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bytes32[]' }],
+  },
+  {
+    name: 'getFinding',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'findingId', type: 'bytes32' }],
+    outputs: [{
+      name: '',
+      type: 'tuple',
+      components: [
+        { name: 'contractAddress', type: 'address' },
+        { name: 'vulnType',        type: 'string'  },
+        { name: 'severity',        type: 'string'  },
+        { name: 'description',     type: 'string'  },
+        { name: 'scannerAgent',    type: 'string'  },
+        { name: 'scanner',         type: 'address' },
+        { name: 'validator',       type: 'address' },
+        { name: 'status',          type: 'uint8'   },
+        { name: 'rewardSTT',       type: 'uint256' },
+        { name: 'submittedAt',     type: 'uint256' },
+        { name: 'reviewedAt',      type: 'uint256' },
+      ],
+    }],
+  },
 ] as const;
 
 // ─── WatchlistHandler ABI ─────────────────────────────────────────────────
@@ -664,6 +701,70 @@ async function syncHireCountFromChain(agentId: string): Promise<void> {
     }
   } catch (err: any) {
     console.error('[CHAIN] syncHireCountFromChain failed:', err.message);
+  }
+}
+
+/**
+ * On startup: read all findings from SecurityRegistry on-chain and
+ * re-hydrate findingLogs so stats/feeds survive server restarts.
+ * status: 0=Pending, 1=Confirmed, 2=Rejected
+ */
+async function syncFindingsFromChain(): Promise<void> {
+  if (!SECURITY_REGISTRY_ADDRESS || !viemPublicClient) return;
+  try {
+    const ids = await viemPublicClient.readContract({
+      address: SECURITY_REGISTRY_ADDRESS,
+      abi: SECURITY_REGISTRY_ABI,
+      functionName: 'getFindingIds',
+      args: [],
+    }) as `0x${string}`[];
+
+    if (!ids || ids.length === 0) {
+      console.log('[CHAIN] No findings on-chain yet');
+      return;
+    }
+
+    const onChainFindings: FindingLog[] = [];
+    for (const id of ids) {
+      try {
+        const f = await viemPublicClient.readContract({
+          address: SECURITY_REGISTRY_ADDRESS,
+          abi: SECURITY_REGISTRY_ABI,
+          functionName: 'getFinding',
+          args: [id],
+        }) as any;
+
+        const statusMap: Record<number, boolean | null> = { 0: null, 1: true, 2: false };
+        const confirmed = statusMap[Number(f.status)];
+
+        onChainFindings.push({
+          id: id,
+          timestamp: Number(f.submittedAt) * 1000,
+          contractAddress: f.contractAddress === '0x0000000000000000000000000000000000000000'
+            ? 'source-provided'
+            : f.contractAddress,
+          vulnType: f.vulnType,
+          severity: f.severity as FindingLog['severity'],
+          description: f.description,
+          scannerAgent: f.scannerAgent,
+          confirmed: confirmed === true,
+          rewardSTT: Number(f.rewardSTT) / 1e18,
+          txHash: id,
+        });
+      } catch (e: any) {
+        console.warn(`[CHAIN] Could not read finding ${id}: ${e.message}`);
+      }
+    }
+
+    // Merge: keep any in-session findings that aren't on-chain yet
+    const existingIds = new Set(findingLogs.map(f => f.id));
+    for (const f of onChainFindings) {
+      if (!existingIds.has(f.id)) findingLogs.push(f);
+    }
+
+    console.log(`[CHAIN] Synced ${onChainFindings.length} findings from SecurityRegistry`);
+  } catch (err: any) {
+    console.error('[CHAIN] syncFindingsFromChain failed:', err.message);
   }
 }
 
@@ -1367,48 +1468,181 @@ app.delete('/api/watchlist/:address', async (req: Request, res: Response) => {
 // Route — GET /api/findings
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/findings', (_req: Request, res: Response) => {
-  const recent = findingLogs.slice(-50).reverse();
-  res.json({
-    findings: recent,
-    count: findingLogs.length,
-    confirmedCount: findingLogs.filter(f => f.confirmed).length,
-    criticalCount: findingLogs.filter(f => f.severity === 'critical').length,
-    highCount: findingLogs.filter(f => f.severity === 'high').length,
-    timestamp: new Date().toISOString(),
-  });
+app.get('/api/findings', async (_req: Request, res: Response) => {
+  try {
+    // Read all findings directly from Somnia SecurityRegistry — never stale
+    const ids = await viemPublicClient.readContract({
+      address: SECURITY_REGISTRY_ADDRESS,
+      abi: SECURITY_REGISTRY_ABI,
+      functionName: 'getFindingIds',
+      args: [],
+    }) as `0x${string}`[];
+
+    const findings: any[] = [];
+    for (const id of (ids || [])) {
+      try {
+        const f = await viemPublicClient.readContract({
+          address: SECURITY_REGISTRY_ADDRESS,
+          abi: SECURITY_REGISTRY_ABI,
+          functionName: 'getFinding',
+          args: [id],
+        }) as any;
+        findings.push({
+          id,
+          txHash:          id,
+          contractAddress: f.contractAddress === '0x0000000000000000000000000000000000000000' ? 'source-provided' : f.contractAddress,
+          vulnType:        f.vulnType,
+          severity:        f.severity,
+          description:     f.description,
+          scannerAgent:    f.scannerAgent,
+          confirmed:       Number(f.status) === 1,
+          status:          ['Pending', 'Confirmed', 'Rejected'][Number(f.status)] ?? 'Pending',
+          rewardSTT:       Number(f.rewardSTT) / 1e18,
+          timestamp:       Number(f.submittedAt) * 1000,
+          source:          'somnia-chain',
+        });
+      } catch { /* skip corrupt entry */ }
+    }
+
+    const sorted = findings.sort((a, b) => b.timestamp - a.timestamp);
+    res.json({
+      findings: sorted.slice(0, 50),
+      count:          findings.length,
+      confirmedCount: findings.filter(f => f.confirmed).length,
+      criticalCount:  findings.filter(f => f.severity === 'critical').length,
+      highCount:      findings.filter(f => f.severity === 'high').length,
+      source:         'somnia-chain',
+      timestamp:      new Date().toISOString(),
+    });
+  } catch (err: any) {
+    // Fallback to in-session memory if chain read fails
+    res.json({
+      findings:       findingLogs.slice(-50).reverse(),
+      count:          findingLogs.length,
+      confirmedCount: findingLogs.filter(f => f.confirmed).length,
+      criticalCount:  findingLogs.filter(f => f.severity === 'critical').length,
+      highCount:      findingLogs.filter(f => f.severity === 'high').length,
+      source:         'in-memory-fallback',
+      error:          err.message,
+      timestamp:      new Date().toISOString(),
+    });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Route — GET /api/stats
 // ═══════════════════════════════════════════════════════════════════════════
 
-app.get('/api/stats', (_req: Request, res: Response) => {
-  res.json({
-    economy: {
-      totalPayments: paymentLogs.length,
-      a2aPayments: paymentLogs.filter(p => p.isA2A).length,
-      h2aPayments: paymentLogs.filter(p => !p.isA2A).length,
-      totalAgents: agentRegistry.length,
-      activeAgents: agentRegistry.filter(a => a.isActive).length,
-      avgReputation: Math.round(agentRegistry.reduce((s, a) => s + a.reputation, 0) / agentRegistry.length),
-    },
-    security: {
-      totalVulnsFound: findingLogs.length,
-      criticalCount: findingLogs.filter(f => f.severity === 'critical').length,
-      highCount: findingLogs.filter(f => f.severity === 'high').length,
-      mediumCount: findingLogs.filter(f => f.severity === 'medium').length,
-      lowCount: findingLogs.filter(f => f.severity === 'low').length,
-      confirmedFindings: findingLogs.filter(f => f.confirmed).length,
-    },
-    topAgents: agentRegistry
-      .sort((a, b) => b.reputation - a.reputation)
-      .slice(0, 5)
-      .map(a => ({ name: a.name, reputation: a.reputation, jobs: a.jobsCompleted })),
-    recentPayments: paymentLogs.slice(-10).reverse(),
-    network: NETWORK,
-    uptime: process.uptime(),
-  });
+app.get('/api/stats', async (_req: Request, res: Response) => {
+  try {
+    // Read permanent stats directly from Somnia SecurityRegistry — survives server restarts
+    const [ids, repBP, ...hireCounts] = await Promise.all([
+      viemPublicClient.readContract({
+        address: SECURITY_REGISTRY_ADDRESS,
+        abi: SECURITY_REGISTRY_ABI,
+        functionName: 'getFindingIds',
+        args: [],
+      }) as Promise<`0x${string}`[]>,
+      viemPublicClient.readContract({
+        address: SECURITY_REGISTRY_ADDRESS,
+        abi: SECURITY_REGISTRY_ABI,
+        functionName: 'scannerReputation',
+        args: [PLATFORM_ADDRESS as Hex],
+      }) as Promise<bigint>,
+      ...agentRegistry.map(a =>
+        viemPublicClient.readContract({
+          address: SECURITY_REGISTRY_ADDRESS,
+          abi: SECURITY_REGISTRY_ABI,
+          functionName: 'agentHireCount',
+          args: [a.id],
+        }) as Promise<bigint>
+      ),
+    ]);
+
+    // Fetch individual findings to compute severity + confirmed breakdown
+    const findings: any[] = [];
+    for (const id of (ids || [])) {
+      try {
+        const f = await viemPublicClient.readContract({
+          address: SECURITY_REGISTRY_ADDRESS,
+          abi: SECURITY_REGISTRY_ABI,
+          functionName: 'getFinding',
+          args: [id],
+        }) as any;
+        findings.push({ severity: f.severity, status: Number(f.status) });
+      } catch { /* skip */ }
+    }
+
+    const reputationPct = Number(repBP) / 100;
+    const totalHires = hireCounts.reduce((s, c) => s + Number(c), 0);
+
+    // Update local registry with fresh chain values
+    agentRegistry.forEach((a, i) => {
+      if (hireCounts[i] !== undefined) a.jobsCompleted = Number(hireCounts[i]);
+      a.reputation = reputationPct;
+      a.efficiency = a.priceSTT > 0 ? Math.round((reputationPct / 100) * (1 / (a.priceSTT + 0.001)) * 100) / 100 : 0;
+    });
+
+    res.json({
+      economy: {
+        totalPayments: paymentLogs.length,           // session-only (payments have no on-chain count)
+        a2aPayments:   paymentLogs.filter(p => p.isA2A).length,
+        h2aPayments:   paymentLogs.filter(p => !p.isA2A).length,
+        totalAgents:   agentRegistry.length,
+        activeAgents:  agentRegistry.filter(a => a.isActive).length,
+        avgReputation: Math.round(reputationPct),
+        totalHires,
+      },
+      security: {
+        totalVulnsFound:   findings.length,
+        criticalCount:     findings.filter(f => f.severity === 'critical').length,
+        highCount:         findings.filter(f => f.severity === 'high').length,
+        mediumCount:       findings.filter(f => f.severity === 'medium').length,
+        lowCount:          findings.filter(f => f.severity === 'low').length,
+        confirmedFindings: findings.filter(f => f.status === 1).length,
+        rejectedFindings:  findings.filter(f => f.status === 2).length,
+        pendingFindings:   findings.filter(f => f.status === 0).length,
+      },
+      topAgents: [...agentRegistry]
+        .sort((a, b) => b.reputation - a.reputation)
+        .slice(0, 5)
+        .map(a => ({ name: a.name, reputation: a.reputation, jobs: a.jobsCompleted })),
+      recentPayments: paymentLogs.slice(-10).reverse(),
+      source:  'somnia-chain',
+      network: NETWORK,
+      uptime:  process.uptime(),
+    });
+  } catch (err: any) {
+    // Fallback: return what we have in-session if chain read fails
+    res.json({
+      economy: {
+        totalPayments: paymentLogs.length,
+        a2aPayments:   paymentLogs.filter(p => p.isA2A).length,
+        h2aPayments:   paymentLogs.filter(p => !p.isA2A).length,
+        totalAgents:   agentRegistry.length,
+        activeAgents:  agentRegistry.filter(a => a.isActive).length,
+        avgReputation: Math.round(agentRegistry.reduce((s, a) => s + a.reputation, 0) / agentRegistry.length),
+        totalHires:    agentRegistry.reduce((s, a) => s + a.jobsCompleted, 0),
+      },
+      security: {
+        totalVulnsFound:   findingLogs.length,
+        criticalCount:     findingLogs.filter(f => f.severity === 'critical').length,
+        highCount:         findingLogs.filter(f => f.severity === 'high').length,
+        mediumCount:       findingLogs.filter(f => f.severity === 'medium').length,
+        lowCount:          findingLogs.filter(f => f.severity === 'low').length,
+        confirmedFindings: findingLogs.filter(f => f.confirmed).length,
+      },
+      topAgents: [...agentRegistry]
+        .sort((a, b) => b.reputation - a.reputation)
+        .slice(0, 5)
+        .map(a => ({ name: a.name, reputation: a.reputation, jobs: a.jobsCompleted })),
+      recentPayments: paymentLogs.slice(-10).reverse(),
+      source:  'in-memory-fallback',
+      error:   err.message,
+      network: NETWORK,
+      uptime:  process.uptime(),
+    });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2132,7 +2366,8 @@ app.listen(PORT, HOST, async () => {
   await initReactivitySubscription();   // SecurityRegistry events
   await initWatchlistSubscription();    // WatchlistHandler RescanRequested events
 
-  // Seed reputation and hire counts from chain
-  await syncReputationFromChain(PLATFORM_ADDRESS);
-  await Promise.all(agentRegistry.map(a => syncHireCountFromChain(a.id)));
+  // Seed all persistent state from Somnia chain (survives server restarts)
+  await syncFindingsFromChain();                                          // re-hydrate findingLogs
+  await syncReputationFromChain(PLATFORM_ADDRESS);                        // agent reputation scores
+  await Promise.all(agentRegistry.map(a => syncHireCountFromChain(a.id))); // hire counts
 });
