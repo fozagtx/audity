@@ -25,8 +25,8 @@ export default function Home() {
         tool: 'Agent Delegation',
         selectedAgent: log.worker,
         reason: log.reason || `Hire by ${log.hirer}`,
-        valueScore: 100,
-        alternatives: [],
+        valueScore: log.valueScore ?? log.efficiency ?? 0,
+        alternatives: log.alternatives || [],
         approved: true
       } : log;
       setHiringDecisions(prev => [...prev, decisionLog]);

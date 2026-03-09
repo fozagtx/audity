@@ -1,25 +1,50 @@
 'use client';
 
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { Shield, CheckCircle, Swords, Rocket, Activity } from 'lucide-react';
 import { SOMNIA } from '@/lib/network';
 
-// ─── Agent definitions ────────────────────────────────────────────────────────
+const API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4002').replace(/\/$/, '');
 
-const AGENTS = [
-  { id: 'scanner-1',   name: 'Scanner Agent',   price: '0.010', icon: Shield,       color: '#6EE7B7', label: 'SCANNER',   rep: 92 },
-  { id: 'scanner-2',   name: 'Scanner Agent',   price: '0.010', icon: Shield,       color: '#6EE7B7', label: 'SCANNER',   rep: 89 },
-  { id: 'scanner-3',   name: 'Scanner Agent',   price: '0.010', icon: Shield,       color: '#6EE7B7', label: 'SCANNER',   rep: 87 },
-  { id: 'validator-1', name: 'Validator Agent', price: '0.005', icon: CheckCircle,  color: '#60A5FA', label: 'VALIDATOR', rep: 94 },
-  { id: 'validator-2', name: 'Validator Agent', price: '0.005', icon: CheckCircle,  color: '#60A5FA', label: 'VALIDATOR', rep: 91 },
-  { id: 'exploit-1',   name: 'Exploit Sim',     price: '0.020', icon: Swords,       color: '#F87171', label: 'EXPLOIT',   rep: 96 },
-];
+// ─── Category → visual mapping ────────────────────────────────────────────────
+
+const CATEGORY_META: Record<string, { icon: React.ElementType; color: string; label: string }> = {
+  'security-scanner':   { icon: Shield,       color: '#6EE7B7', label: 'SCANNER'   },
+  'security-validator': { icon: CheckCircle,  color: '#60A5FA', label: 'VALIDATOR' },
+  'security-exploit':   { icon: Swords,       color: '#F87171', label: 'EXPLOIT'   },
+};
 
 // ─── Main activity chart ──────────────────────────────────────────────────────
 
 const WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+// day index: 0=Sun,1=Mon,...,6=Sat → remap to MON=0..SUN=6
+const JS_DAY_TO_WEEK_IDX = [6, 0, 1, 2, 3, 4, 5];
 
-function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connecting: boolean }) {
+function buildWaveY(payments: { timestamp: string | number }[]): number[] {
+  const counts = [0, 0, 0, 0, 0, 0, 0];
+  for (const p of payments) {
+    const ts = typeof p.timestamp === 'number' ? p.timestamp : Date.parse(p.timestamp as string);
+    if (!isNaN(ts)) {
+      const day = new Date(ts).getDay(); // 0=Sun
+      counts[JS_DAY_TO_WEEK_IDX[day]]++;
+    }
+  }
+  const max = Math.max(...counts, 1);
+  // Map counts → y pixel range [20, 80] (lower y = higher on SVG)
+  return counts.map(c => 80 - Math.round((c / max) * 60));
+}
+
+function ActivityChart({
+  onDeploy,
+  connecting,
+  waveY,
+  agentCount,
+}: {
+  onDeploy: () => void;
+  connecting: boolean;
+  waveY: number[];
+  agentCount: number;
+}) {
   const [hovered, setHovered] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -27,8 +52,7 @@ function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connect
   const PAD = { top: 12, bottom: 20, left: 4, right: 4 };
 
   const getX = (i: number) => PAD.left + (i / (WEEK.length - 1)) * (W - PAD.left - PAD.right);
-  const WAVE_Y = [72, 58, 64, 42, 52, 34, 28];
-  const points = WEEK.map((_, i) => ({ x: getX(i), y: WAVE_Y[i] }));
+  const points = WEEK.map((_, i) => ({ x: getX(i), y: waveY[i] ?? 60 }));
 
   const linePath = points.reduce((acc, pt, i) => {
     if (i === 0) return `M${pt.x},${pt.y}`;
@@ -39,12 +63,12 @@ function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connect
 
   const areaPath = `${linePath} L${getX(WEEK.length - 1)},${H - PAD.bottom} L${getX(0)},${H - PAD.bottom} Z`;
 
-  const scatterDots = useMemo(() => Array.from({ length: 20 }, (_, i) => ({
-    x: 20 + (i % 5) * 60 + (Math.random() - 0.5) * 30,
-    y: 8 + Math.floor(i / 5) * 16 + (Math.random() - 0.5) * 8,
-    r: 1 + Math.random() * 1.5,
-    o: 0.15 + Math.random() * 0.2,
-  })), []);
+  // Scatter dots seeded from points so they don't randomize on every render
+  const scatterDots = useMemo(() => points.flatMap((pt, i) => [
+    { x: pt.x - 8,  y: pt.y - 6,  r: 1.2, o: 0.18 },
+    { x: pt.x + 10, y: pt.y + 5,  r: 1.0, o: 0.14 },
+    { x: pt.x + 4,  y: pt.y - 10, r: 1.5, o: 0.20 },
+  ].map(d => ({ ...d, key: `${i}-${d.x}` }))), []);
 
   const onMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!svgRef.current) return;
@@ -62,7 +86,7 @@ function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connect
         <div>
           <div className="mono" style={{ fontSize: '0.65rem', color: '#6B7280', letterSpacing: '0.1em', marginBottom: 6 }}>YOUR AI SECURITY TEAM</div>
           <div className="mono" style={{ fontSize: '1.5rem', fontWeight: 900, color: '#FFFFFF', letterSpacing: '-0.04em', lineHeight: 1 }}>
-            6 Agents Ready
+            {agentCount} Agent{agentCount !== 1 ? 's' : ''} Ready
           </div>
           <div className="mono" style={{ fontSize: '0.65rem', color: '#9CA3AF', marginTop: 6 }}>
             Connect wallet to deploy
@@ -74,7 +98,7 @@ function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connect
         </div>
       </div>
 
-      {/* Decorative chart */}
+      {/* Activity chart — sourced from real payment timestamps */}
       <div style={{ flex: 1 }}>
         <svg
           ref={svgRef}
@@ -96,8 +120,8 @@ function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connect
               opacity={hovered === i ? 0.6 : 0.3} />
           ))}
 
-          {scatterDots.map((d, i) => (
-            <circle key={i} cx={d.x} cy={d.y} r={d.r} fill="#6EE7B7" opacity={d.o} />
+          {scatterDots.map(d => (
+            <circle key={d.key} cx={d.x} cy={d.y} r={d.r} fill="#6EE7B7" opacity={d.o} />
           ))}
 
           <path d={areaPath} fill="url(#bentoArea)" />
@@ -136,9 +160,18 @@ function ActivityChart({ onDeploy, connecting }: { onDeploy: () => void; connect
 
 // ─── Agent Card ───────────────────────────────────────────────────────────────
 
-function AgentCard({ agent }: { agent: typeof AGENTS[0] }) {
+interface LiveAgent {
+  id: string;
+  name: string;
+  category: string;
+  priceSTT: number;
+  reputation: number;
+}
+
+function AgentCard({ agent }: { agent: LiveAgent }) {
   const [hovered, setHovered] = useState(false);
-  const Icon = agent.icon;
+  const meta = CATEGORY_META[agent.category] ?? { icon: Shield, color: '#9CA3AF', label: agent.category.toUpperCase() };
+  const Icon = meta.icon;
 
   return (
     <div
@@ -146,7 +179,7 @@ function AgentCard({ agent }: { agent: typeof AGENTS[0] }) {
       onMouseLeave={() => setHovered(false)}
       style={{
         background: hovered ? '#161616' : '#111111',
-        border: `1px solid ${hovered ? agent.color + '40' : 'rgba(255,255,255,0.06)'}`,
+        border: `1px solid ${hovered ? meta.color + '40' : 'rgba(255,255,255,0.06)'}`,
         padding: '18px',
         display: 'flex',
         flexDirection: 'column',
@@ -154,15 +187,15 @@ function AgentCard({ agent }: { agent: typeof AGENTS[0] }) {
         gap: 16,
         transition: 'all 0.2s ease',
         cursor: 'default',
-        boxShadow: hovered ? `0 0 20px ${agent.color}0D` : 'none',
+        boxShadow: hovered ? `0 0 20px ${meta.color}0D` : 'none',
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div style={{ width: 32, height: 32, background: `${agent.color}14`, border: `1px solid ${agent.color}30`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Icon size={15} color={hovered ? agent.color : '#6B7280'} />
+        <div style={{ width: 32, height: 32, background: `${meta.color}14`, border: `1px solid ${meta.color}30`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon size={15} color={hovered ? meta.color : '#6B7280'} />
         </div>
-        <span className="mono" style={{ fontSize: '0.55rem', color: hovered ? agent.color : '#4B5563', fontWeight: 700, letterSpacing: '0.08em', transition: 'color 0.2s' }}>
-          {agent.label}
+        <span className="mono" style={{ fontSize: '0.55rem', color: hovered ? meta.color : '#4B5563', fontWeight: 700, letterSpacing: '0.08em', transition: 'color 0.2s' }}>
+          {meta.label}
         </span>
       </div>
 
@@ -171,10 +204,10 @@ function AgentCard({ agent }: { agent: typeof AGENTS[0] }) {
           {agent.name}
         </div>
         <div className="mono" style={{ fontSize: '0.6rem', color: '#4B5563', fontWeight: 700, marginBottom: 2 }}>
-          {agent.price} STT / scan
+          {agent.priceSTT} STT / scan
         </div>
-        <div className="mono" style={{ fontSize: '0.55rem', color: hovered ? agent.color : '#374151', transition: 'color 0.2s' }}>
-          REP {agent.rep}/100
+        <div className="mono" style={{ fontSize: '0.55rem', color: hovered ? meta.color : '#374151', transition: 'color 0.2s' }}>
+          REP {agent.reputation}/100
         </div>
       </div>
     </div>
@@ -184,6 +217,54 @@ function AgentCard({ agent }: { agent: typeof AGENTS[0] }) {
 // ─── Bento Grid ───────────────────────────────────────────────────────────────
 
 export default function AgentBento({ onDeploy, connecting }: { onDeploy: () => void; connecting: boolean }) {
+  const [agents, setAgents] = useState<LiveAgent[]>([]);
+  const [waveY, setWaveY] = useState<number[]>([60, 60, 60, 60, 60, 60, 60]);
+
+  // Fetch registry + payments on mount
+  useEffect(() => {
+    fetch(`${API}/api/registry`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data.agents)) setAgents(data.agents); })
+      .catch(() => {});
+
+    fetch(`${API}/api/payments`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data.payments)) setWaveY(buildWaveY(data.payments)); })
+      .catch(() => {});
+  }, []);
+
+  // SSE: live reputation + payment updates
+  useEffect(() => {
+    const sse = new EventSource(`${API}/api/agent/events`);
+
+    sse.addEventListener('agent_reputation_update', (e) => {
+      try {
+        const { scannerAddress, reputation } = JSON.parse((e as MessageEvent).data);
+        setAgents(prev => prev.map(a =>
+          a.id?.toLowerCase() === scannerAddress?.toLowerCase() ||
+          (a as any).address?.toLowerCase() === scannerAddress?.toLowerCase()
+            ? { ...a, reputation }
+            : a
+        ));
+      } catch {}
+    });
+
+    sse.addEventListener('payment', (e) => {
+      // Re-fetch payments to recompute activity chart
+      fetch(`${API}/api/payments`)
+        .then(r => r.json())
+        .then(data => { if (Array.isArray(data.payments)) setWaveY(buildWaveY(data.payments)); })
+        .catch(() => {});
+    });
+
+    return () => sse.close();
+  }, []);
+
+  // Show up to 6 agent cards (grid layout is fixed to 6 slots)
+  const displayed = agents.slice(0, 6);
+  // Pad with nulls if fewer than 6 so grid doesn't collapse
+  const slots: (LiveAgent | null)[] = [...displayed, ...Array(Math.max(0, 6 - displayed.length)).fill(null)];
+
   return (
     <div style={{ width: '100%', maxWidth: 760 }}>
       <div style={{
@@ -201,20 +282,20 @@ export default function AgentBento({ onDeploy, connecting }: { onDeploy: () => v
           padding: '24px',
           boxShadow: '0 0 40px rgba(110,231,183,0.05)',
         }}>
-          <ActivityChart onDeploy={onDeploy} connecting={connecting} />
+          <ActivityChart onDeploy={onDeploy} connecting={connecting} waveY={waveY} agentCount={agents.length} />
         </div>
 
         {/* Agents 0 and 1 go in right col */}
-        <AgentCard agent={AGENTS[0]} />
-        <AgentCard agent={AGENTS[1]} />
+        {slots[0] && <AgentCard agent={slots[0]} />}
+        {slots[1] && <AgentCard agent={slots[1]} />}
 
         {/* Row 2: 3 agent cards */}
-        <AgentCard agent={AGENTS[2]} />
-        <AgentCard agent={AGENTS[3]} />
-        <AgentCard agent={AGENTS[4]} />
+        {slots[2] && <AgentCard agent={slots[2]} />}
+        {slots[3] && <AgentCard agent={slots[3]} />}
+        {slots[4] && <AgentCard agent={slots[4]} />}
 
         {/* Row 3: last agent + stat blocks */}
-        <AgentCard agent={AGENTS[5]} />
+        {slots[5] && <AgentCard agent={slots[5]} />}
 
         {/* Exploit warning */}
         <div style={{ background: '#0D0D0D', border: '1px solid rgba(248,113,113,0.15)', padding: '18px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>

@@ -6,7 +6,7 @@ export const SOMNIA = {
   chainName:      'Somnia Testnet',
   rpc:            'https://api.infra.testnet.somnia.network',
   wss:            'wss://api.infra.testnet.somnia.network',
-  explorer:       'https://shannon.somnia.network',
+  explorer:       'https://shannon-explorer.somnia.network',
   nativeCurrency: { name: 'STT', symbol: 'STT', decimals: 18 },
 } as const;
 

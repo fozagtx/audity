@@ -30,6 +30,22 @@ export default function ToolsPage() {
       .catch(() => setLoading(false));
   }, []);
 
+  // Live SSE updates — re-fetch tools when Somnia chain emits reputation/hire events
+  useEffect(() => {
+    const refetch = () => {
+      fetch(`${API}/api/tools`)
+        .then(res => res.json())
+        .then(data => setTools(data))
+        .catch(() => {});
+    };
+
+    const sse = new EventSource(`${API}/api/agent/events`);
+    sse.addEventListener('agent_reputation_update', refetch);
+    sse.addEventListener('agent_hired_update', refetch);
+
+    return () => sse.close();
+  }, []);
+
   const categories = ['All', ...Array.from(new Set(tools.map(t => t.category.charAt(0).toUpperCase() + t.category.slice(1))))];
 
   const filteredTools = selectedCategory === 'All'

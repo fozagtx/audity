@@ -5,7 +5,7 @@ export const SOMNIA = {
   chainName:  'Somnia Testnet',
   rpcHttp:    'https://api.infra.testnet.somnia.network',
   rpcWss:     'wss://api.infra.testnet.somnia.network',
-  explorer:   'https://shannon.somnia.network',
+  explorer:   'https://shannon-explorer.somnia.network',
   symbol:     'STT',
 } as const;
 

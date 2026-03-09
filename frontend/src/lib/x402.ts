@@ -26,12 +26,21 @@ export async function fetchWithX402(
     return firstResponse;
   }
 
-  let challenge: X402Challenge;
+  let body: { x402?: { payTo?: string; amount?: string; chainId?: number }; [k: string]: unknown };
   try {
-    challenge = await firstResponse.json() as X402Challenge;
+    body = await firstResponse.json();
   } catch {
     throw new Error('x402: Could not parse payment challenge from 402 response');
   }
+  // Backend wraps payment details under the `x402` key: { error, x402: { payTo, amount, ... }, message }
+  const x402Data = body.x402 || {};
+  const challenge: X402Challenge = {
+    amount:    String(x402Data.amount    ?? (body as any).amount    ?? '0'),
+    token:     'STT',
+    recipient: String(x402Data.payTo     ?? (body as any).recipient ?? (body as any).payTo ?? ''),
+    chainId:   Number(x402Data.chainId   ?? (body as any).chainId   ?? 50312),
+    endpoint:  url,
+  };
 
   if (typeof window === 'undefined' || !(window as any).ethereum) {
     throw new Error('x402: MetaMask not available — cannot pay');

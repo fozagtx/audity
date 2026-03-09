@@ -33,7 +33,7 @@ export default function ToolCatalog() {
           price: t.price?.STT ?? 0,
           token: 'STT',
           canHireSubAgents: t.canHireSubAgents,
-          reputation: t.reputation || 95,
+          reputation: t.reputation ?? 0,
           isExternal: t.isExternal,
           mcpCompatible: t.mcpCompatible
         }));
