@@ -800,7 +800,7 @@ async function initReactivitySubscription(): Promise<void> {
       eventContractSources: [SECURITY_REGISTRY_ADDRESS],
       topicOverrides: [FINDING_SUBMITTED_SIG, FINDING_CONFIRMED_SIG, FINDING_REJECTED_SIG, AGENT_HIRED_SIG],
       onlyPushChanges: false,
-      onData: (data: SubscriptionCallback) => {
+      onData: async (data: SubscriptionCallback) => {
         const topics = data.result.topics as Hex[];
         const rawData = data.result.data as Hex;
         if (!topics || topics.length === 0) return;
