@@ -1,0 +1,30 @@
+{
+  "name": "audity",
+  "version": "2.0.0",
+  "description": "Audity — Smart contract security platform. AI agents scan, validate, and simulate exploits powered by LLMs and STT micropayments on Somnia Testnet.",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:backend": "cd backend && bun run dev",
+    "dev:frontend": "cd frontend && bun run dev",
+    "dev": "concurrently \"bun run dev:backend\" \"bun run dev:frontend\"",
+    "install:all": "cd backend && bun install && cd ../frontend && bun install"
+  },
+  "keywords": [
+    "audity",
+    "smart-contract-security",
+    "somnia",
+    "evm",
+    "ai-agents",
+    "blockchain",
+    "micropayments",
+    "solidity-audit"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

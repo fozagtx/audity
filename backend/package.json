@@ -1,0 +1,42 @@
+{
+  "name": "audity-backend",
+  "version": "2.0.0",
+  "description": "Audity — Smart contract security platform backend with STT micropayments on Somnia Testnet",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "start:prod": "node dist/index.js"
+  },
+  "keywords": [
+    "audity",
+    "smart-contract-security",
+    "somnia",
+    "evm",
+    "micropayments",
+    "solidity-audit"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@somnia-chain/reactivity": "^0.1.10",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/morgan": "^1.9.9",
+    "@types/node": "^22.0.0",
+    "axios": "^1.13.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.0",
+    "express": "^4.21.2",
+    "groq-sdk": "^0.37.0",
+    "helmet": "^8.0.0",
+    "morgan": "^1.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "viem": "^2.47.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
